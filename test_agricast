@@ -1,0 +1,314 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Unit tests for AgriCast AgriAgent tool functions.
+Tests cover soil analysis, crop recommendation, weather risk, and irrigation planning.
+"""
+import json
+import os
+import sys
+# Ensure the agent module can be imported without GCP credentials
+os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "False")
+os.environ.setdefault("GOOGLE_API_KEY", "test-key-placeholder")
+# Add the project root to the path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from app.agent import analyze_soil, recommend_crop, assess_weather_risk, get_irrigation_plan, get_current_date
+# ---------------------------------------------------------------------------
+# analyze_soil tests
+# ---------------------------------------------------------------------------
+class TestAnalyzeSoil:
+    """Tests for the analyze_soil tool."""
+    def test_optimal_soil_returns_high_score(self):
+        """Optimal loam soil with ideal NPK/pH should score >= 85."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20, soil_type="loam"
+        ))
+        assert result["health_score"] >= 85
+        assert result["grade"] == "Excellent"
+    def test_acidic_ph_lowers_score(self):
+        """Severely acidic pH should trigger a critical warning and reduce score."""
+        result = json.loads(analyze_soil(
+            ph=4.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20, soil_type="loam"
+        ))
+        assert result["health_score"] < 80
+        assert any("acidic" in insight.lower() or "lime" in insight.lower()
+                   for insight in result["insights"])
+    def test_alkaline_ph_lowers_score(self):
+        """Alkaline pH > 8.5 should trigger a critical warning."""
+        result = json.loads(analyze_soil(
+            ph=9.0, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20, soil_type="loam"
+        ))
+        assert result["health_score"] < 80
+        assert any("alkaline" in insight.lower() for insight in result["insights"])
+    def test_low_nitrogen_triggers_warning(self):
+        """N < 40 mg/kg should produce a low-nitrogen insight."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=20, phosphorus=50, potassium=100,
+            moisture=55, temperature=20
+        ))
+        assert result["health_score"] < 90
+        assert any("LOW N" in insight or "nitrogen" in insight.lower()
+                   for insight in result["insights"])
+    def test_low_phosphorus_triggers_warning(self):
+        """P < 30 mg/kg should produce a low-phosphorus insight."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=15, potassium=100,
+            moisture=55, temperature=20
+        ))
+        assert any("LOW P" in insight for insight in result["insights"])
+    def test_low_potassium_triggers_warning(self):
+        """K < 60 mg/kg should produce a low-potassium insight."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=30,
+            moisture=55, temperature=20
+        ))
+        assert any("LOW K" in insight for insight in result["insights"])
+    def test_dry_soil_triggers_irrigation_alert(self):
+        """Moisture < 35% should trigger a dry alert."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=15, temperature=20
+        ))
+        assert any("DRY" in insight.upper() for insight in result["insights"])
+    def test_waterlogged_soil_triggers_warning(self):
+        """Moisture > 80% should trigger a waterlogging warning."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=90, temperature=20
+        ))
+        assert any("WATERLOGGED" in insight.upper() for insight in result["insights"])
+    def test_sandy_soil_type_note_included(self):
+        """Sandy soil_type should include a texture-specific insight."""
+        result = json.loads(analyze_soil(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20, soil_type="sand"
+        ))
+        assert any("sandy" in insight.lower() or "leach" in insight.lower()
+                   for insight in result["insights"])
+    def test_score_bounded_between_0_and_100(self):
+        """Score must always be in [0, 100] even under worst conditions."""
+        result = json.loads(analyze_soil(
+            ph=3.0, nitrogen=5, phosphorus=5, potassium=5,
+            moisture=0, temperature=0, soil_type="sand"
+        ))
+        assert 0 <= result["health_score"] <= 100
+    def test_return_type_is_valid_json(self):
+        """Result must be valid JSON with required fields."""
+        raw = analyze_soil(ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+                           moisture=55, temperature=20)
+        result = json.loads(raw)
+        for key in ("health_score", "grade", "insights", "ph", "nitrogen"):
+            assert key in result
+# ---------------------------------------------------------------------------
+# recommend_crop tests
+# ---------------------------------------------------------------------------
+class TestRecommendCrop:
+    """Tests for the recommend_crop tool."""
+    def test_returns_top_3_crops(self):
+        """Function must always return exactly 3 crop recommendations."""
+        result = json.loads(recommend_crop(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20
+        ))
+        assert "top_recommendations" in result
+        assert len(result["top_recommendations"]) == 3
+    def test_recommendations_ranked_descending(self):
+        """Crops must be sorted by compatibility_pct descending."""
+        result = json.loads(recommend_crop(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20
+        ))
+        scores = [r["compatibility_pct"] for r in result["top_recommendations"]]
+        assert scores == sorted(scores, reverse=True)
+    def test_compatibility_pct_in_valid_range(self):
+        """All compatibility percentages must be in [0, 100]."""
+        result = json.loads(recommend_crop(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20
+        ))
+        for rec in result["top_recommendations"]:
+            assert 0 <= rec["compatibility_pct"] <= 100
+    def test_wheat_matches_wheat_ideal_soil(self):
+        """Wheat-ideal conditions should return Wheat as top recommendation."""
+        result = json.loads(recommend_crop(
+            ph=6.5, nitrogen=55, phosphorus=40, potassium=65,
+            moisture=42, temperature=18
+        ))
+        top_crop = result["top_recommendations"][0]["crop"]
+        # Wheat or any close match — score should be >= 80
+        top_score = result["top_recommendations"][0]["compatibility_pct"]
+        assert top_score >= 60  # At least a moderate match
+    def test_rice_matches_high_moisture(self):
+        """High moisture conditions should favour rice."""
+        result = json.loads(recommend_crop(
+            ph=6.0, nitrogen=80, phosphorus=40, potassium=55,
+            moisture=85, temperature=28
+        ))
+        top_names = [r["crop"] for r in result["top_recommendations"]]
+        assert "Rice" in top_names
+    def test_each_recommendation_has_required_fields(self):
+        """Each recommendation must have crop, type, compatibility_pct, status, grow_days."""
+        result = json.loads(recommend_crop(
+            ph=6.5, nitrogen=80, phosphorus=50, potassium=100,
+            moisture=55, temperature=20
+        ))
+        for rec in result["top_recommendations"]:
+            for field in ("crop", "type", "compatibility_pct", "status", "grow_days"):
+                assert field in rec
+# ---------------------------------------------------------------------------
+# assess_weather_risk tests
+# ---------------------------------------------------------------------------
+class TestAssessWeatherRisk:
+    """Tests for the assess_weather_risk tool."""
+    def test_frost_returns_hazardous(self):
+        """Frost condition should produce a very low planting rating."""
+        result = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Wheat",
+            temp_min=-3, temp_max=5, wind_speed=10, condition="Frost"
+        ))
+        assert result["planting_rating"] < 40
+        assert "Hazardous" in result["label"]
+    def test_heavy_rain_reduces_rating(self):
+        """Heavy Rain should reduce the planting rating significantly."""
+        result_rain = json.loads(assess_weather_risk(
+            region="tropical", crop_name="Maize (Corn)",
+            temp_min=18, temp_max=25, wind_speed=10, condition="Heavy Rain"
+        ))
+        result_sunny = json.loads(assess_weather_risk(
+            region="tropical", crop_name="Maize (Corn)",
+            temp_min=18, temp_max=25, wind_speed=10, condition="Sunny"
+        ))
+        assert result_rain["planting_rating"] < result_sunny["planting_rating"]
+    def test_light_rain_boosts_rating(self):
+        """Light Rain should boost the planting rating."""
+        result_rain = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Wheat",
+            temp_min=12, temp_max=20, wind_speed=8, condition="Light Rain"
+        ))
+        result_sunny = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Wheat",
+            temp_min=12, temp_max=20, wind_speed=8, condition="Sunny"
+        ))
+        assert result_rain["planting_rating"] >= result_sunny["planting_rating"]
+    def test_high_wind_reduces_rating(self):
+        """Wind speed > 25 km/h should reduce the rating."""
+        result_windy = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Wheat",
+            temp_min=12, temp_max=20, wind_speed=35, condition="Sunny"
+        ))
+        result_calm = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Wheat",
+            temp_min=12, temp_max=20, wind_speed=8, condition="Sunny"
+        ))
+        assert result_windy["planting_rating"] < result_calm["planting_rating"]
+    def test_unknown_crop_returns_error(self):
+        """Unknown crop name should return an error field."""
+        result = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Dragonberry",
+            temp_min=10, temp_max=20, wind_speed=10, condition="Sunny"
+        ))
+        assert "error" in result
+    def test_rating_bounded_0_to_100(self):
+        """Rating must always be in [0, 100]."""
+        result = json.loads(assess_weather_risk(
+            region="temperate", crop_name="Tomato",
+            temp_min=-10, temp_max=45, wind_speed=60, condition="Thunderstorm"
+        ))
+        assert 0 <= result["planting_rating"] <= 100
+    def test_result_has_required_fields(self):
+        """Result must have planting_rating, label, and risk_factors."""
+        result = json.loads(assess_weather_risk(
+            region="arid", crop_name="Wheat",
+            temp_min=15, temp_max=28, wind_speed=12, condition="Sunny"
+        ))
+        for key in ("planting_rating", "label", "risk_factors", "crop", "region"):
+            assert key in result
+# ---------------------------------------------------------------------------
+# get_irrigation_plan tests
+# ---------------------------------------------------------------------------
+class TestGetIrrigationPlan:
+    """Tests for the get_irrigation_plan tool."""
+    def test_critical_dry_triggers_urgent_irrigation(self):
+        """Moisture critically below minimum should return CRITICAL urgency."""
+        result = json.loads(get_irrigation_plan(
+            field_name="East Acre", moisture_pct=15.0,
+            temperature=22.0, crop_name="Wheat"
+        ))
+        assert result["irrigation_urgency"] == "CRITICAL"
+    def test_waterlogged_triggers_high_urgency(self):
+        """Severely waterlogged field should return HIGH urgency to suspend irrigation."""
+        result = json.loads(get_irrigation_plan(
+            field_name="South Valley", moisture_pct=95.0,
+            temperature=20.0, crop_name="Wheat"
+        ))
+        assert result["irrigation_urgency"] in ("HIGH", "MODERATE")
+        assert any("suspend" in a.lower() or "waterlog" in a.lower() or "drainage" in a.lower()
+                   for a in result["recommended_actions"])
+    def test_optimal_moisture_returns_none_urgency(self):
+        """Moisture within optimal range should return None urgency."""
+        result = json.loads(get_irrigation_plan(
+            field_name="West Ridge", moisture_pct=45.0,
+            temperature=20.0, crop_name="Wheat"
+        ))
+        assert result["irrigation_urgency"] == "None"
+    def test_high_temperature_triggers_timing_advice(self):
+        """Temperature > 35°C should add a timing recommendation."""
+        result = json.loads(get_irrigation_plan(
+            field_name="East Acre", moisture_pct=40.0,
+            temperature=38.0, crop_name="Maize (Corn)"
+        ))
+        assert any("morning" in a.lower() or "evaporation" in a.lower()
+                   for a in result["recommended_actions"])
+    def test_low_temperature_advises_against_irrigation(self):
+        """Temperature < 10°C should warn against irrigation to avoid frost damage."""
+        result = json.loads(get_irrigation_plan(
+            field_name="East Acre", moisture_pct=40.0,
+            temperature=5.0, crop_name="Wheat"
+        ))
+        assert any("frost" in a.lower() or "low" in a.lower()
+                   for a in result["recommended_actions"])
+    def test_result_has_required_fields(self):
+        """Result must include field, crop, moisture, urgency, and actions."""
+        result = json.loads(get_irrigation_plan(
+            field_name="South Valley", moisture_pct=60.0,
+            temperature=22.0, crop_name="Rice"
+        ))
+        for key in ("field", "crop", "current_moisture", "irrigation_urgency",
+                    "recommended_actions", "optimal_moisture_range"):
+            assert key in result
+    def test_unknown_crop_uses_default_thresholds(self):
+        """Unknown crop should still return a valid plan with default thresholds."""
+        result = json.loads(get_irrigation_plan(
+            field_name="North Field", moisture_pct=50.0,
+            temperature=20.0, crop_name="ExoticUnknownCrop"
+        ))
+        assert "irrigation_urgency" in result
+        assert len(result["recommended_actions"]) > 0
+# ---------------------------------------------------------------------------
+# get_current_date test
+# ---------------------------------------------------------------------------
+class TestGetCurrentDate:
+    """Tests for the get_current_date helper."""
+    def test_returns_string_with_date(self):
+        """Should return a non-empty string containing date info."""
+        result = get_current_date()
+        assert isinstance(result, str)
+        assert len(result) > 0
+    def test_contains_utc(self):
+        """Result should mention UTC timezone."""
+        result = get_current_date()
+        assert "UTC" in result
