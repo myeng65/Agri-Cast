@@ -1,6 +1,6 @@
 # Agri-Cast
 A full-stack AgriTech web application 
-ashboard — live soil NPK/pH gauges, IoT telemetry cards, weather forecast strip
+Dashboard — live soil NPK/pH gauges, IoT telemetry cards, weather forecast strip
 Crop Planner — compatibility scoring across 7 crop varieties
 Soil Analyser — interactive sliders → health score + insight panel
 Weather Risk — 5-day forecast with planting suitability ratings
